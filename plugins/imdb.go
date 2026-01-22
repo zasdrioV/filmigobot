@@ -4,11 +4,7 @@
 package plugins
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
@@ -27,23 +23,13 @@ const (
 	imdbLogo     = "https://telegra.ph/file/1720930421ae2b00d9bab.jpg"
 	imdbBanner   = "https://telegra.ph/file/2dd6f7c9ebfb237db4826.jpg"
 	imdbHomepage = "https://imdb.com"
-	// unofficialAPI const is removed (it's in omdb.go)
 )
 
-// unofficialSearchResult struct is removed (it's in omdb.go)
-
-
-// ImdbInlineSearch now calls the working OMDbInlineSearch
 func IMDbInlineSearch(query string) []gotgbot.InlineQueryResult {
-	// This now calls the function in omdb.go
 	results := OMDbInlineSearch(query)
-	
-	// We just need to change the ID prefix from "omdb_" to "imdb_"
 	for i := range results {
 		if photoResult, ok := results[i].(gotgbot.InlineQueryResultArticle); ok {
 			photoResult.Id = strings.Replace(photoResult.Id, searchMethodOMDb, searchMethodIMDb, 1)
-			
-			// Also update the callback data
 			if photoResult.ReplyMarkup != nil && len(photoResult.ReplyMarkup.InlineKeyboard) > 0 {
 				callbackData := photoResult.ReplyMarkup.InlineKeyboard[0][0].CallbackData
 				photoResult.ReplyMarkup.InlineKeyboard[0][0].CallbackData = strings.Replace(callbackData, searchMethodOMDb, searchMethodIMDb, 1)
@@ -54,13 +40,11 @@ func IMDbInlineSearch(query string) []gotgbot.InlineQueryResult {
 	return results
 }
 
-// GetIMDbTitle is now just a wrapper for GetOMDbTitle
-func GetIMDbTitle(id string) (string, string, [][]gotgbot.InlineKeyboardButton, error) {
-	// This now calls the function in omdb.go
-	return GetOMDbTitle(id)
+// --- FIX: Updated signature to match GetOMDbTitle ---
+func GetIMDbTitle(id string, progress func(string)) (string, string, [][]gotgbot.InlineKeyboardButton, error) {
+	return GetOMDbTitle(id, progress)
 }
 
-// IMDbCommand handles the /imdb command.
 func IMDbCommand(bot *gotgbot.Bot, ctx *ext.Context) error {
 	update := ctx.EffectiveMessage
 
@@ -77,63 +61,45 @@ func IMDbCommand(bot *gotgbot.Bot, ctx *ext.Context) error {
 		messageText string
 		buttons     [][]gotgbot.InlineKeyboardButton
 		err         error
-		posterURL   string = imdbBanner // Default to banner
+		previewURL  string = imdbBanner
 	)
 
 	if id := regexp.MustCompile(`tt\d+`).FindString(input); id != "" {
-		// --- FIX: Use link preview method ---
-		imgURL, caption, btns, e := GetOMDbTitle(id)
+		// Pass nil for progress as we don't handle intermediate edits in command yet
+		pURL, caption, btns, e := GetOMDbTitle(id, nil)
 		if e != nil {
 			err = e
 		} else {
-			// Invisible link hack to force poster preview
-			posterURL = imgURL // Save the real poster URL
-			messageText = fmt.Sprintf("<a href=\"%s\">&#8203;</a>%s", posterURL, caption)
+			previewURL = pURL
+			messageText = fmt.Sprintf("<a href=\"%s\">&#8203;</a>%s", previewURL, caption)
 			buttons = btns
 		}
 	} else {
-		// --- FIX: Use unofficial API for search ---
-		apiURL := fmt.Sprintf("%s?q=%s", unofficialAPI, url.QueryEscape(input))
-		resp, e := http.Get(apiURL)
+		results, e := SearchOMDb(input)
 		if e != nil {
 			err = e
 		} else {
-			defer resp.Body.Close()
-			body, e := io.ReadAll(resp.Body)
-			if e != nil {
-				err = e
-			} else {
-				var searchData unofficialSearchResponse
-				if e := json.Unmarshal(body, &searchData); e != nil {
-					err = e
-				} else if !searchData.Ok || len(searchData.Description) < 1 {
-					err = errors.New("No results found")
-				} else {
-					// This is a search result, so we just send text + buttons
-					posterURL = imdbBanner
-					messageText = fmt.Sprintf("<a href=\"%s\">&#8203;</a><i>👋 Hey <tg-spoiler>%s</tg-spoiler> I've got %d Results for you 👇</i>", posterURL, mention(ctx.EffectiveUser), len(searchData.Description))
-					for _, r := range searchData.Description {
-						buttons = append(buttons, []gotgbot.InlineKeyboardButton{{Text: fmt.Sprintf("%s (%d)", r.Title, r.Year), CallbackData: fmt.Sprintf("open_%s_%s", searchMethodIMDb, r.ImdbID)}})
-					}
-				}
+			previewURL = imdbBanner
+			messageText = fmt.Sprintf("<a href=\"%s\">&#8203;</a><i>👋 Hey <tg-spoiler>%s</tg-spoiler> I've got %d Results for you 👇</i>", previewURL, mention(ctx.EffectiveUser), len(results))
+			for _, r := range results {
+				buttons = append(buttons, []gotgbot.InlineKeyboardButton{{Text: fmt.Sprintf("%s (%d)", r.Title, r.Year), CallbackData: fmt.Sprintf("open_%s_%s", searchMethodIMDb, r.ID)}})
 			}
 		}
 	}
 
 	if err != nil {
-		posterURL = imdbBanner // Use banner for errors
-		messageText = fmt.Sprintf("<a href=\"%s\">&#8203;</a><i>I'm Sorry %s I Couldn't find Anything for <code>%s</code> 🤧</i>", posterURL, mention(ctx.EffectiveUser), input)
+		previewURL = imdbBanner
+		messageText = fmt.Sprintf("<a href=\"%s\">&#8203;</a><i>I'm Sorry %s I Couldn't find Anything for <code>%s</code> 🤧</i>", previewURL, mention(ctx.EffectiveUser), input)
 		buttons = [][]gotgbot.InlineKeyboardButton{{{Text: "Search On Google 🔎", Url: fmt.Sprintf("https://google.com/search?q=%s", url.QueryEscape(input))}}}
 	}
-	
-	// --- FIX: Send as a Text Message with ShowAboveText ---
+
 	_, err = bot.SendMessage(ctx.EffectiveChat.Id, messageText, &gotgbot.SendMessageOpts{
 		ParseMode:   gotgbot.ParseModeHTML,
 		ReplyMarkup: gotgbot.InlineKeyboardMarkup{InlineKeyboard: buttons},
 		LinkPreviewOptions: &gotgbot.LinkPreviewOptions{
-			IsDisabled:      false,
-			ShowAboveText: true, // <-- THIS IS THE FIX
-			Url:             posterURL,
+			IsDisabled:    false,
+			ShowAboveText: true,
+			Url:           previewURL,
 		},
 	})
 	if err != nil {
