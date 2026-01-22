@@ -11,7 +11,6 @@ import (
 	"github.com/PaulSonOfLars/gotgbot/v2/ext"
 )
 
-// Edit message after the result is chosen.
 func InlineResultHandler(bot *gotgbot.Bot, ctx *ext.Context) error {
 	var (
 		update = ctx.ChosenInlineResult
@@ -33,15 +32,22 @@ func InlineResultHandler(bot *gotgbot.Bot, ctx *ext.Context) error {
 		id     = args[1]
 	)
 
-	posterURL, caption, buttons, err := getChosenResult(method, id)
+	// --- FIX: Pass status updater ---
+	statusUpdater := func(msg string) {
+		bot.EditMessageText(msg, &gotgbot.EditMessageTextOpts{
+			InlineMessageId: update.InlineMessageId,
+			ParseMode:       gotgbot.ParseModeHTML,
+		})
+	}
+	
+	previewURL, caption, buttons, err := getChosenResult(method, id, statusUpdater)
 	if err != nil {
 		fmt.Println(err)
 		return nil
 	}
 
-	messageText := fmt.Sprintf("<a href=\"%s\">&#8203;</a>%s", posterURL, caption)
+	messageText := fmt.Sprintf("<a href=\"%s\">&#8203;</a>%s", previewURL, caption)
 
-	// --- FIX: Change from EditMessageMedia to EditMessageText ---
 	_, _, err = bot.EditMessageText(
 		messageText,
 		&gotgbot.EditMessageTextOpts{
@@ -50,8 +56,8 @@ func InlineResultHandler(bot *gotgbot.Bot, ctx *ext.Context) error {
 			ReplyMarkup:     gotgbot.InlineKeyboardMarkup{InlineKeyboard: buttons},
 			LinkPreviewOptions: &gotgbot.LinkPreviewOptions{
 				IsDisabled:      false,
-				ShowAboveText: true, // <-- THIS IS THE FIX
-				Url:             posterURL,
+				ShowAboveText: true,
+				Url:             previewURL,
 			},
 		},
 	)
@@ -62,22 +68,19 @@ func InlineResultHandler(bot *gotgbot.Bot, ctx *ext.Context) error {
 	return nil
 }
 
-// Returns the content to edit with.
-func getChosenResult(method, id string) (string, string, [][]gotgbot.InlineKeyboardButton, error) {
+// --- FIX: Signature updated ---
+func getChosenResult(method, id string, progress func(string)) (string, string, [][]gotgbot.InlineKeyboardButton, error) {
 	switch method {
-	// case searchMethodJW:
-	// 	return GetJWTitle(id)
 	case searchMethodIMDb:
-		return GetIMDbTitle(id)
+		return GetOMDbTitle(id, progress)
 	case searchMethodOMDb:
-		return GetOMDbTitle(id)
+		return GetOMDbTitle(id, progress)
 	default:
 		fmt.Println("unknown method on choseninlineresult : " + method)
-		return GetOMDbTitle(id)
+		return GetOMDbTitle(id, progress)
 	}
 }
 
-// CbOpen handles callbacks from open_ buttons in search results.
 func CbOpen(bot *gotgbot.Bot, ctx *ext.Context) error {
 	update := ctx.CallbackQuery
 
@@ -91,22 +94,25 @@ func CbOpen(bot *gotgbot.Bot, ctx *ext.Context) error {
 		method = split[1]
 		id     = split[2]
 		
-		posterURL string
+		previewURL string
 		caption   string
 		buttons   [][]gotgbot.InlineKeyboardButton
 		err       error
 	)
 
+	// --- FIX: Pass status updater ---
+	statusUpdater := func(msg string) {
+		update.Message.EditText(bot, msg, &gotgbot.EditMessageTextOpts{ParseMode: gotgbot.ParseModeHTML})
+	}
+
 	switch method {
-	// case searchMethodJW:
-	// 	photo, buttons, err = GetJWTitle(id)
 	case searchMethodIMDb:
-		posterURL, caption, buttons, err = GetIMDbTitle(id)
+		previewURL, caption, buttons, err = GetOMDbTitle(id, statusUpdater)
 	case searchMethodOMDb:
-		posterURL, caption, buttons, err = GetOMDbTitle(id)
+		previewURL, caption, buttons, err = GetOMDbTitle(id, statusUpdater)
 	default:
 		fmt.Println("unknown method on cbopen: " + method)
-		posterURL, caption, buttons, err = GetOMDbTitle(id)
+		previewURL, caption, buttons, err = GetOMDbTitle(id, statusUpdater)
 	}
 
 	if err != nil {
@@ -115,16 +121,15 @@ func CbOpen(bot *gotgbot.Bot, ctx *ext.Context) error {
 		return nil
 	}
 
-	messageText := fmt.Sprintf("<a href=\"%s\">&#8203;</a>%s", posterURL, caption)
+	messageText := fmt.Sprintf("<a href=\"%s\">&#8203;</a>%s", previewURL, caption)
 
-	// --- FIX: Change from EditMedia to EditMessageText ---
 	_, _, err = update.Message.EditText(bot, messageText, &gotgbot.EditMessageTextOpts{
 		ParseMode:   gotgbot.ParseModeHTML,
 		ReplyMarkup: gotgbot.InlineKeyboardMarkup{InlineKeyboard: buttons},
 		LinkPreviewOptions: &gotgbot.LinkPreviewOptions{
 			IsDisabled:      false,
-			ShowAboveText: true, // <-- THIS IS THE FIX
-			Url:             posterURL,
+			ShowAboveText: true,
+			Url:             previewURL,
 		},
 	})
 	if err != nil {
