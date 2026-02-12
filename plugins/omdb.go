@@ -1,5 +1,5 @@
 // (c) Jisin0
-// Functions and types to search using Hybrid APIs (Primary: Unofficial, Fallback: imdbapi.dev + OMDb + TMDB).
+// Functions and types to search using Hybrid APIs.
 
 package plugins
 
@@ -25,8 +25,8 @@ const (
 	notAvailable = "N/A"
 
 	// API Endpoints
-	apiPrimary  = "https://imdb.iamidiotareyoutoo.com/search"
-	apiFallback = "https://api.imdbapi.dev"
+	apiPrimary  = "https://imdb.iamidiotareyoutoo.com/search" // Used for Details only
+	apiFallback = "https://api.imdbapi.dev"                   // Used for Search & Fallback Details
 	apiTMDB     = "https://api.themoviedb.org/3"
 	tmdbKey     = "1b4ba621cf09ae9752dd659e6e55307b"
 
@@ -59,6 +59,7 @@ type UniversalSearchResult struct {
 	Year   int
 	Poster string
 	Type   string
+	Rating float64 // --- ADDED RATINGS ---
 }
 
 // ==========================================
@@ -139,15 +140,6 @@ func makeSubHeader(text string) tgNode {
 // ==========================================
 // 2. PRIMARY API STRUCTS
 // ==========================================
-type primarySearchRes struct {
-	Ok          bool `json:"ok"`
-	Description []struct {
-		ImdbID string `json:"#IMDB_ID"`
-		Title  string `json:"#TITLE"`
-		Year   int    `json:"#YEAR"`
-		Poster string `json:"#IMG_POSTER"`
-	} `json:"description"`
-}
 
 type primaryDetailData struct {
 	Ok    bool `json:"ok"`
@@ -363,8 +355,12 @@ type fallbackSearchRes struct {
 		StartYear    int    `json:"startYear"`
 		PrimaryImage *struct{ URL string `json:"url"` } `json:"primaryImage"`
 		Type         string `json:"type"`
-	} `json:"results"`
+		Rating       *struct {                          // --- ADDED RATINGS EXTRACTION ---
+			AggregateRating float64 `json:"aggregateRating"`
+		} `json:"rating"`
+	} `json:"titles"` // Uses titles mapping from imdbapi.dev
 }
+
 type fallbackDetailData struct {
 	ID             string   `json:"id"`
 	Type           string   `json:"type"`
@@ -404,25 +400,29 @@ type tmdbFindRes struct {
 	TVResults    []struct{ ID int `json:"id"` } `json:"tv_results"`
 }
 type tmdbDetailRes struct {
-	PosterPath   string `json:"poster_path"`
-	BackdropPath string `json:"backdrop_path"`
-	Tagline      string `json:"tagline"`
-	ReleaseDate  string `json:"release_date"`   // Movies
-	FirstAirDate string `json:"first_air_date"` // TV
-	Credits      struct {
+	Title         string `json:"title"`          
+	OriginalTitle string `json:"original_title"` 
+	PosterPath    string `json:"poster_path"`
+	BackdropPath  string `json:"backdrop_path"`
+	Tagline       string `json:"tagline"`
+	ReleaseDate   string `json:"release_date"`   
+	FirstAirDate  string `json:"first_air_date"` 
+	OriginCountry []string `json:"origin_country"` 
+	ProductionCountries []struct{ Name string `json:"name"` } `json:"production_countries"` 
+	
+	Credits       struct {
 		Cast []struct {
-			ID        int    `json:"id"` // TMDB Person ID
+			ID        int    `json:"id"` 
 			Name      string `json:"name"`
 			Character string `json:"character"`
 		} `json:"cast"`
 		Crew []struct {
-			ID         int    `json:"id"` // TMDB Person ID
+			ID         int    `json:"id"` 
 			Name       string `json:"name"`
 			Job        string `json:"job"`
 			Department string `json:"department"`
 		} `json:"crew"`
 	} `json:"credits"`
-	// TV Specifics (Use aggregate credits for full list)
 	AggregateCredits struct {
 		Cast []struct {
 			ID    int    `json:"id"`
@@ -432,6 +432,12 @@ type tmdbDetailRes struct {
 			} `json:"roles"`
 		} `json:"cast"`
 	} `json:"aggregate_credits"`
+	AlternativeTitles struct {
+		Titles []struct {
+			Title string `json:"title"`
+			Iso   string `json:"iso_3166_1"`
+		} `json:"titles"`
+	} `json:"alternative_titles"`
 	NumSeasons  int `json:"number_of_seasons"`
 	NumEpisodes int `json:"number_of_episodes"`
 	CreatedBy   []struct {
@@ -450,6 +456,7 @@ type omdbFillData struct {
 	Released     string `json:"Released"`
 	Awards       string `json:"Awards"`
 	TotalSeasons string `json:"totalSeasons"`
+	Country      string `json:"Country"`
 }
 
 // ==========================================
@@ -457,25 +464,8 @@ type omdbFillData struct {
 // ==========================================
 
 func SearchOMDb(query string) ([]UniversalSearchResult, error) {
-	// 1. Try Primary
-	apiURL := fmt.Sprintf("%s?q=%s", apiPrimary, url.QueryEscape(query))
-	if resp, err := http.Get(apiURL); err == nil {
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
-		var pData primarySearchRes
-		if json.Unmarshal(body, &pData) == nil && pData.Ok && len(pData.Description) > 0 {
-			var results []UniversalSearchResult
-			for _, item := range pData.Description {
-				results = append(results, UniversalSearchResult{
-					ID: item.ImdbID, Title: item.Title, Year: item.Year, Poster: item.Poster,
-				})
-			}
-			return results, nil
-		}
-	}
-
-	// 2. Try Fallback
-	apiURL = fmt.Sprintf("%s/search/titles?query=%s", apiFallback, url.QueryEscape(query))
+	// EXCLUSIVE INLINE SEARCH: imdbapi.dev
+	apiURL := fmt.Sprintf("%s/search/titles?query=%s", apiFallback, url.QueryEscape(query))
 	if resp, err := http.Get(apiURL); err == nil {
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
@@ -488,19 +478,24 @@ func SearchOMDb(query string) ([]UniversalSearchResult, error) {
 					poster = item.PrimaryImage.URL
 				}
 				
-				// Fix: Add type info to title
 				typeTag := ""
-				if item.Type != "" { typeTag = fmt.Sprintf(" [%s]", strings.Title(item.Type)) }
+				if item.Type != "" { typeTag = strings.Title(item.Type) }
+
+				// --- RATINGS EXTRACTION ---
+				rating := 0.0
+				if item.Rating != nil {
+					rating = item.Rating.AggregateRating
+				}
 
 				results = append(results, UniversalSearchResult{
-					ID: item.ID, Title: item.PrimaryTitle, Year: item.StartYear, Poster: poster, Type: typeTag,
+					ID: item.ID, Title: item.PrimaryTitle, Year: item.StartYear, Poster: poster, Type: typeTag, Rating: rating,
 				})
 			}
 			return results, nil
 		}
 	}
 
-	return nil, errors.New("No results found")
+	return nil, errors.New("No results found via imdbapi.dev")
 }
 
 func OMDbInlineSearch(query string) []gotgbot.InlineQueryResult {
@@ -516,13 +511,23 @@ func OMDbInlineSearch(query string) []gotgbot.InlineQueryResult {
 			posterURL = omdbBanner
 		}
 
-		// Use Type in title
-		title := fmt.Sprintf("%s (%d)%s", item.Title, item.Year, item.Type)
+		// --- FIX: Title and Subtext formatting ---
+		title := item.Title
+		if item.Year > 0 {
+			title = fmt.Sprintf("%s [%d]", item.Title, item.Year)
+		}
+
+		description := item.Type
+		if item.Rating > 0 {
+			description = fmt.Sprintf("%s | Ratings: %.1f ⭐", item.Type, item.Rating)
+		} else {
+			description = fmt.Sprintf("%s | Ratings: N/A", item.Type)
+		}
 
 		tgResults = append(tgResults, gotgbot.InlineQueryResultArticle{
 			Id:           searchMethodOMDb + "_" + item.ID,
 			Title:        title,
-			Description:  item.Type,
+			Description:  description,
 			ThumbnailUrl: posterURL,
 			InputMessageContent: gotgbot.InputTextMessageContent{
 				MessageText: fmt.Sprintf("<i>Loading details for %s...</i>", item.Title),
@@ -783,7 +788,7 @@ func getDetailsPrimary(id string) (string, string, [][]gotgbot.InlineKeyboardBut
 		awards = fmt.Sprintf("%d wins & %d nominations total.", t.Main.Wins.Total, t.Main.Nominations.Total)
 	}
 	if awards != "" {
-		sb.WriteString(fmt.Sprintf("<b><a href=\"%s\">Awards:</a> </b>%s\n", awardsURL, awards))
+		sb.WriteString(fmt.Sprintf("<b>Awards: </b><a href=\"%s\">%s</a>\n", awardsURL, awards))
 	}
 	sb.WriteString(fmt.Sprintf("<b>OTT Info: </b><a href=\"https://www.justwatch.com/in/search?q=%s\">Find on JustWatch</a></blockquote>", url.QueryEscape(t.Top.TitleText.Text)))
 
@@ -908,6 +913,8 @@ func getDetailsPrimary(id string) (string, string, [][]gotgbot.InlineKeyboardBut
 
 func getDetailsFallback(id string) (string, string, [][]gotgbot.InlineKeyboardButton, error) {
 	var buttons [][]gotgbot.InlineKeyboardButton
+
+	// 1. ImdbApiDev (Base)
 	resp, err := http.Get(fmt.Sprintf("%s/titles/%s", apiFallback, id))
 	if err != nil {
 		return "", "", buttons, err
@@ -939,8 +946,8 @@ func getDetailsFallback(id string) (string, string, [][]gotgbot.InlineKeyboardBu
 	if json.Unmarshal(body, &t) != nil {
 		return "", "", buttons, errors.New("Fallback parse error")
 	}
-	
-	// Parallel Fetch
+
+	// 2. Parallel Fetch: AKAs, OMDb, TMDB
 	var credits fallbackCredits
 	var akas fallbackAKA
 	var omdbFill omdbFillData
@@ -950,6 +957,7 @@ func getDetailsFallback(id string) (string, string, [][]gotgbot.InlineKeyboardBu
 
 	wg.Add(3)
 
+	// A. AKAs & Credits (from imdbapi.dev)
 	go func() {
 		defer wg.Done()
 		if r, e := http.Get(fmt.Sprintf("%s/titles/%s/credits", apiFallback, id)); e == nil {
@@ -963,6 +971,7 @@ func getDetailsFallback(id string) (string, string, [][]gotgbot.InlineKeyboardBu
 			json.Unmarshal(b, &akas)
 		}
 	}()
+	// B. OMDb
 	go func() {
 		defer wg.Done()
 		if r, e := http.Get(fmt.Sprintf("https://www.omdbapi.com/?i=%s&apikey=%s", id, OmdbApiKey)); e == nil {
@@ -970,6 +979,7 @@ func getDetailsFallback(id string) (string, string, [][]gotgbot.InlineKeyboardBu
 			json.NewDecoder(r.Body).Decode(&omdbFill)
 		}
 	}()
+	// C. TMDB (Find -> Details)
 	go func() {
 		defer wg.Done()
 		findURL := fmt.Sprintf("%s/find/%s?api_key=%s&external_source=imdb_id", apiTMDB, id, tmdbKey)
@@ -989,9 +999,10 @@ func getDetailsFallback(id string) (string, string, [][]gotgbot.InlineKeyboardBu
 				}
 
 				if tmdbID > 0 {
-					appendQuery := "credits,release_dates,content_ratings"
+					// --- FIX: append_to_response adjusted for series ---
+					appendQuery := "credits,release_dates,content_ratings,alternative_titles"
 					if mediaType == "tv" {
-						appendQuery = "aggregate_credits,content_ratings"
+						appendQuery = "aggregate_credits,content_ratings,alternative_titles"
 					}
 					
 					detailURL := fmt.Sprintf("%s/%s/%d?api_key=%s&append_to_response=%s", apiTMDB, mediaType, tmdbID, tmdbKey, appendQuery)
@@ -1008,11 +1019,18 @@ func getDetailsFallback(id string) (string, string, [][]gotgbot.InlineKeyboardBu
 	}()
 	wg.Wait()
 
+	// --- BUILD CAPTION ---
 	var sb strings.Builder
 	isSeries := (t.Type == "tvSeries" || t.Type == "tvMiniSeries")
 	typeStr := strings.Title(t.Type)
 	if t.Type == "tvSeries" {
 		typeStr = "TV Series"
+	}
+	
+	// --- FIX: Use TMDB Title if available, else PrimaryTitle ---
+	mainTitle := t.PrimaryTitle
+	if tmdbFound && tmdbDetails.Title != "" {
+		mainTitle = tmdbDetails.Title
 	}
 
 	var yearStr string
@@ -1023,12 +1041,54 @@ func getDetailsFallback(id string) (string, string, [][]gotgbot.InlineKeyboardBu
 	} else {
 		yearStr = fmt.Sprintf("[%d]", t.StartYear)
 	}
-	sb.WriteString(fmt.Sprintf("<i>%s: </i><b>%s %s</b> | <a href=\"%s\">IMDb Link</a>\n", typeStr, t.PrimaryTitle, yearStr, omdbHomepage+"/title/"+id))
-
-	if len(akas.Titles) > 0 {
-		sb.WriteString(fmt.Sprintf("<i>(AKA: %s)</i>\n", akas.Titles[0].Title))
+	sb.WriteString(fmt.Sprintf("<i>%s: </i><b>%s %s</b> | <a href=\"%s\">IMDb Link</a>\n", typeStr, mainTitle, yearStr, omdbHomepage+"/title/"+id))
+	
+	// Original Title Logic
+	orgTitle := ""
+	if tmdbFound && tmdbDetails.OriginalTitle != "" {
+		orgTitle = tmdbDetails.OriginalTitle
+	}
+	if orgTitle != "" && orgTitle != mainTitle {
+		sb.WriteString(fmt.Sprintf("<i>(Original Title: %s)</i>\n", orgTitle))
 	}
 
+	// AKA Logic (Smart US/IN Fallback)
+	akaStr := ""
+	if tmdbFound && len(tmdbDetails.AlternativeTitles.Titles) > 0 {
+		isUS := false
+		if len(t.OriginCountries) > 0 {
+			for _, c := range t.OriginCountries {
+				if c.Name == "United States" { isUS = true; break }
+			}
+		}
+		target := "US"
+		if isUS { target = "IN" } // If US movie, prefer India AKA
+		
+		// 1. Try Target Region
+		for _, alt := range tmdbDetails.AlternativeTitles.Titles {
+			if alt.Iso == target && alt.Title != mainTitle {
+				akaStr = alt.Title
+				break
+			}
+		}
+		// 2. Try any different title
+		if akaStr == "" {
+			for _, alt := range tmdbDetails.AlternativeTitles.Titles {
+				if alt.Title != mainTitle {
+					akaStr = alt.Title
+					break
+				}
+			}
+		}
+	}
+	if akaStr == "" && len(akas.Titles) > 0 {
+		akaStr = akas.Titles[0].Title
+	}
+	if akaStr != "" && akaStr != mainTitle {
+		sb.WriteString(fmt.Sprintf("<i>(AKA %s)</i>\n", akaStr))
+	}
+
+	// --- SEASONS (Prefer TMDB) ---
 	if isSeries {
 		if tmdbFound && tmdbDetails.NumSeasons > 0 {
 			sb.WriteString(fmt.Sprintf("<b>%d Seasons (%d Episodes)</b>\n", tmdbDetails.NumSeasons, tmdbDetails.NumEpisodes))
@@ -1047,6 +1107,7 @@ func getDetailsFallback(id string) (string, string, [][]gotgbot.InlineKeyboardBu
 		sb.WriteString(fmt.Sprintf("<i>Duration: </i>%s\n", dur))
 	}
 
+	// --- RELEASE DATE ---
 	var dateStr string
 	if tmdbFound && (tmdbDetails.ReleaseDate != "" || tmdbDetails.FirstAirDate != "") {
 		raw := tmdbDetails.ReleaseDate
@@ -1066,9 +1127,22 @@ func getDetailsFallback(id string) (string, string, [][]gotgbot.InlineKeyboardBu
 	if dateStr != "" {
 		flag := ""
 		countryName := ""
-		if len(t.OriginCountries) > 0 {
+		
+		// Priority 1: TMDB Production Countries (Movies)
+		if tmdbFound && len(tmdbDetails.ProductionCountries) > 0 {
+			countryName = tmdbDetails.ProductionCountries[0].Name
+		}
+		
+		// Priority 2: Fallback Origin Countries
+		if countryName == "" && len(t.OriginCountries) > 0 {
 			countryName = t.OriginCountries[0].Name
 		}
+		
+		// Priority 3: OMDb Country
+		if countryName == "" && omdbFill.Country != "" && omdbFill.Country != notAvailable {
+			countryName = omdbFill.Country
+		}
+		
 		if countryName != "" {
 			flag = getFlag(countryName)
 		}
@@ -1136,6 +1210,7 @@ func getDetailsFallback(id string) (string, string, [][]gotgbot.InlineKeyboardBu
 	}
 	sb.WriteString("</blockquote>\n\n")
 
+	// --- TAGLINE (TMDB) ---
 	if tmdbFound && tmdbDetails.Tagline != "" {
 		sb.WriteString(fmt.Sprintf("<b>\"%s\"</b>\n\n", tmdbDetails.Tagline))
 	}
@@ -1145,12 +1220,20 @@ func getDetailsFallback(id string) (string, string, [][]gotgbot.InlineKeyboardBu
 	}
 
 	sb.WriteString("<blockquote>")
+	// Cast & Crew
 	var dirs, writers, stars, producers []string
 
+	// Prefer TMDB Cast
 	if tmdbFound {
 		if isSeries {
 			for _, c := range tmdbDetails.CreatedBy {
 				dirs = append(dirs, link(c.Name, c.ID))
+			}
+			// --- FIX: TV Producers (Search in aggregate credits crew) ---
+			for _, c := range tmdbDetails.Credits.Crew {
+				if (c.Job == "Executive Producer" || c.Job == "Producer") && len(producers) < 5 {
+					producers = append(producers, link(c.Name, c.ID))
+				}
 			}
 		} else {
 			for _, c := range tmdbDetails.Credits.Crew {
@@ -1158,19 +1241,6 @@ func getDetailsFallback(id string) (string, string, [][]gotgbot.InlineKeyboardBu
 					dirs = append(dirs, link(c.Name, c.ID))
 				}
 				if c.Job == "Producer" && len(producers) < 5 {
-					producers = append(producers, link(c.Name, c.ID))
-				}
-			}
-		}
-		
-		// Fix: TV Producers loop
-		if isSeries {
-			// TV shows use "aggregate_credits" but our struct maps it to "credits" or "aggregate_credits" depending on mapping
-			// The current tmdbDetailRes struct has AggregateCredits for TV.
-			// However, Crew is often missing from AggregateCredits in simple struct.
-			// We check the Credits (standard) Crew for Executive Producers which is usually populated for TV.
-			for _, c := range tmdbDetails.Credits.Crew {
-				if (c.Job == "Executive Producer" || c.Job == "Producer") && len(producers) < 5 {
 					producers = append(producers, link(c.Name, c.ID))
 				}
 			}
@@ -1188,6 +1258,7 @@ func getDetailsFallback(id string) (string, string, [][]gotgbot.InlineKeyboardBu
 		}
 	}
 
+	// Fallback to imdbapi.dev if needed
 	if len(dirs) == 0 {
 		for _, d := range t.Directors {
 			dirs = append(dirs, link(d.Name, d.ID))
@@ -1217,8 +1288,10 @@ func getDetailsFallback(id string) (string, string, [][]gotgbot.InlineKeyboardBu
 		sb.WriteString(fmt.Sprintf("<i><b>Stars:</b></i> %s\n", strings.Join(stars, ", ")))
 	}
 
+	// Top Cast
 	var topCast []string
 	if tmdbFound {
+		// Switch to Aggregate Credits for TV if available
 		targetCast := tmdbDetails.Credits.Cast
 		if isSeries && len(tmdbDetails.AggregateCredits.Cast) > 0 {
 			targetCast = nil 
@@ -1249,12 +1322,15 @@ func getDetailsFallback(id string) (string, string, [][]gotgbot.InlineKeyboardBu
 	sb.WriteString("</blockquote>\n\n")
 
 	sb.WriteString("<blockquote>")
+	// Awards (OMDb)
 	awardsURL := fmt.Sprintf("%s/title/%s/awards", omdbHomepage, id)
 	if omdbFill.Awards != "" && omdbFill.Awards != notAvailable {
+		// --- FIX: Attached URL to text ---
 		sb.WriteString(fmt.Sprintf("<b>Awards: </b><a href=\"%s\">%s</a>\n", awardsURL, omdbFill.Awards))
 	}
 	sb.WriteString(fmt.Sprintf("<b>OTT Info: </b><a href=\"https://www.justwatch.com/in/search?q=%s\">Find on JustWatch</a></blockquote>", url.QueryEscape(t.PrimaryTitle)))
 
+	// --- FALLBACK TELEGRAPH PAGE (USING TMDB & IMDBAPI DATA) ---
 	if enableTelegraph && tmdbFound {
 		var nodes []tgNode
 		nodes = append(nodes, tgNode{Tag: "h3", Children: []any{fmt.Sprintf("%s (%d)", t.PrimaryTitle, t.StartYear)}})
@@ -1280,6 +1356,7 @@ func getDetailsFallback(id string) (string, string, [][]gotgbot.InlineKeyboardBu
 			nodes = append(nodes, makeRow("Revenue", fmt.Sprintf("$%d", tmdbDetails.Revenue)))
 		}
 
+		// Full Cast for Telegraph
 		targetCast := tmdbDetails.Credits.Cast
 		if isSeries && len(tmdbDetails.AggregateCredits.Cast) > 0 {
 			targetCast = nil 
